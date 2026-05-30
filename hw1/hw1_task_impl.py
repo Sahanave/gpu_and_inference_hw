@@ -133,11 +133,41 @@ def compute_elementwise_metrics(num_elements, num_ops, bytes_per_element, ms, va
 # Q2. In one sample run, `matmul 1024x1024` achieved lower FLOP/s than the
 # `128 ops` compiled element-wise operation. Give one or two reasons why that can
 # happen on a large GPU like an H100.
+# 
+# High arithmetic intensity means a kernel can be compute-bound, but it
+# doesn't guarantee the GPU is fully utilised.
 #
+# The 1024x1024x1024 matmul is too small for an H100:
+#   - It only does ~2.1 GFLOP and finishes in ~59 µs
+#   - The H100 has 132 SMs, but this problem doesn't generate enough work
+#     to keep them all busy (low occupancy)
+#   - The result is that runtime is dominated by kernel-launch overhead
+#     and scheduling inefficiencies, not actual compute
+#   - Measured throughput: only ~36.5 TFLOP/s
+#
+# The `128 ops` kernel does much better (~60 TFLOP/s, ~90% of FP32 peak):
+#   - Sweeps 64M elements with back-to-back fused multiply-adds
+#   - All operations stay in registers (no memory stalls)
+#   - Work is spread evenly across every SM
+#
+# The larger matmuls (n=2048, 4096) recover to ~50 TFLOP/s because the
+# problem is big enough to keep the GPU occupied. This confirms the 1024
+# case is an underutilisation problem, not a flaw in the algorithm.
+
 # Q3. Between `64 ops` and `128 ops`, runtime increases more noticeably than it
 # did for smaller operations. What does that suggest about what resource is
 # becoming the bottleneck?
 #
+# The kernel has crossed the ridge point (~20 FLOP/Byte on the H100) and flipped
+# from memory-bound to compute-bound. 
+# From 1 through 64 ops (AI <= 16) runtime is pinned at ~0.181 ms -- set entirely by the fixed 512 MB of HBM traffic (read x
+# + write acc once), so extra FLOPs are free. 
+# At 128 ops the AI is 32, past the ridge: now the arithmetic takes longer than the memory transfer, 
+# so runtime jumps (0.181 -> 0.285 ms) and effective bandwidth falls from ~2.96 TB/s to
+# ~1.88 TB/s. The bottleneck is no longer HBM bandwidth but FP32 ALU/FMA
+# throughput. Achieved performance (~60 TFLOP/s) is pinned against the compute
+# ceiling, and from here runtime grows with num_ops.
+
 # Q4. Why do the eager `ops-K` points look so different from the compiled ones?
 #
 # Eager mode launches a separate kernel for every `*` and every `+` in the
