@@ -12,8 +12,7 @@ import torch
 
 def lowest_ai_fn(x: torch.Tensor) -> torch.Tensor:
     """Lowest arithmetic intensity baseline (0 FLOP/Byte)."""
-    # TODO (1 line): implement a lowest-AI op
-    pass
+    return x.clone()
 
 
 # TASK 1b: Implement a function with configurable arithmetic intensity.
@@ -37,10 +36,12 @@ def make_compute_fn(num_ops: int, compiled: bool = True):
     """Return an eager or compiled function whose work scales with num_ops."""
 
     def fn(x: torch.Tensor) -> torch.Tensor:
-        pass
-
-    # TODO (1 line): return either `fn` or `torch.compile(fn)` based on `compiled`
-    pass
+        acc=x
+        for i in range(num_ops):
+            acc = (acc * x) + x
+        return acc
+    
+    return torch.compile(fn) if compiled else fn
 
 
 # ============================================================================
@@ -62,8 +63,19 @@ def benchmark_fn(fn, *args, warmup=25, rep=100) -> float:
         fn(*args)
     torch.cuda.synchronize()
 
+
+   starts = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+   ends   = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+
     # TODO: time `rep` runs using CUDA events and return median latency (ms)
-    pass
+    for i  in range(rep):
+        starts[i].record()
+        fn(*args)
+        ends[i].record()
+
+    torch.cuda.synchronize()
+    times_ms = [s.elapsed_time(e) for s, e in zip(starts, ends)]
+    return float(np.median(times_ms))
 
 
 # TASK 3: Compute element-wise operation metrics from measured runtime.
