@@ -1,5 +1,5 @@
 import torch
-
+import numpy as np
 
 # ============================================================================
 # Part 1: Implement PyTorch Functions
@@ -64,8 +64,8 @@ def benchmark_fn(fn, *args, warmup=25, rep=100) -> float:
     torch.cuda.synchronize()
 
 
-   starts = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
-   ends   = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
+    ends   = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
 
     # TODO: time `rep` runs using CUDA events and return median latency (ms)
     for i  in range(rep):
@@ -95,8 +95,20 @@ def benchmark_fn(fn, *args, warmup=25, rep=100) -> float:
 
 
 def compute_elementwise_metrics(num_elements, num_ops, bytes_per_element, ms, variant):
-    # TODO: compute total FLOPs, arithmetic intensity, and achieved FLOP/s
-    pass
+    total_flops = 2 * num_ops * num_elements
+
+    if variant == "compiled":
+        # Fused kernel: one read of x and one write of acc per element.
+        byte_traffic = 2 * num_elements * bytes_per_element
+    else:
+        # Eager: each iteration runs two separate kernels (`*` then `+`),
+        # each round-tripping its operands through HBM. 3 tensor passes per
+        # op * 2 ops per iteration = 6 tensor passes per iteration.
+        byte_traffic = 6 * num_ops * num_elements * bytes_per_element
+
+    ai = total_flops / byte_traffic
+    achieved_flops = total_flops / (ms * 1e-3)
+
     return total_flops, ai, achieved_flops
 
 
@@ -109,6 +121,15 @@ def compute_elementwise_metrics(num_elements, num_ops, bytes_per_element, ms, va
 # Why does performance rise as arithmetic intensity increases even though the
 # measured runtime changes only a little?
 #
+# These compiled kernels are memory-bound: their runtime is set by the time it
+# takes to read `x` and write `acc` to HBM once, and that byte traffic is
+# constant regardless of num_ops (intermediates stay in registers across the
+# fused loop). The extra FLOPs from a larger K execute essentially "for free"
+# while the SMs would otherwise be idle waiting on memory. So FLOPs grow
+# linearly with K but seconds stay roughly flat, and achieved FLOP/s
+# (= FLOPs / seconds) grows linearly. On the roofline plot this looks like
+# walking right and up along the memory-bandwidth slope.
+ 
 # Q2. In one sample run, `matmul 1024x1024` achieved lower FLOP/s than the
 # `128 ops` compiled element-wise operation. Give one or two reasons why that can
 # happen on a large GPU like an H100.
@@ -118,3 +139,17 @@ def compute_elementwise_metrics(num_elements, num_ops, bytes_per_element, ms, va
 # becoming the bottleneck?
 #
 # Q4. Why do the eager `ops-K` points look so different from the compiled ones?
+#
+# Eager mode launches a separate kernel for every `*` and every `+` in the
+# loop, and each kernel has to round-trip its inputs and outputs through HBM
+# because there is no register reuse across kernel boundaries. That means
+# both FLOPs and bytes scale linearly with K, so the ratio (arithmetic
+# intensity) is fixed at roughly 1 / (3 * bytes_per_element) ~= 0.08 FLOP/B
+# regardless of K -- the GPU is pinned in the memory-bound regime. Runtime
+# grows linearly with K (more memory-bound kernels back-to-back) while
+# achieved FLOP/s stays roughly constant, so all the eager points pile up
+# near the same spot on the roofline plot. Compiled mode fuses the whole
+# loop into one kernel, keeps `acc` in registers across iterations, and
+# pays the read+write cost only once -- so AI grows linearly with K and
+# the points walk diagonally up the bandwidth slope.
+
