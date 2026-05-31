@@ -111,11 +111,7 @@ if __name__ == "__main__":
 #     and only then launches the next step. That serializes CPU and GPU.
 #     Fix: keep token ids on the GPU, collect them, and do ONE
 #     torch.cat(tokens).tolist() after the loop.
-#     Speedup contributed: ~7 ms only. Small, because while there's no KV cache
-#     the per-step GPU forward is huge and is the real bottleneck -- the sync was
-#     hiding behind GPU compute. (Amdahl: a fix only pays for the bottleneck it
-#     removes. This fix's real value is unlocked after the KV cache, when the loop
-#     becomes launch-bound.)
+#     Speedup contributed: ~7 ms only. Small
 #
 # (2) KV cache (the big one).
 #     The baseline re-runs the full forward over the whole growing sequence every
@@ -130,7 +126,7 @@ if __name__ == "__main__":
 # (3) bf16 weights (build_model(torch.bfloat16)).
 #     Confirmed active in the trace (nvjet tensor-core GEMMs + flash attention vs
 #     fp32 xmma/cutlass in V0). Speedup contributed on H100: ~0 (276ms -> 280ms).
-#     Same Amdahl reason as (1): after the KV cache the loop is CPU-dispatch-bound
+#     Reason as : after the KV cache the loop is CPU-dispatch-bound
 #     (Self CUDA ~4.7ms vs Self CPU ~164ms over the profile), so halving the
 #     already-tiny GPU compute does nothing to wall-clock. Kept because it's free
 #     and should help more on the bandwidth-poor L40S (the prefill is GPU-bound).
@@ -146,10 +142,6 @@ if __name__ == "__main__":
 #     would re-specialize (recompile) on every new length; dynamic=True compiles
 #     one shape-generic graph instead.
 #     Speedup contributed: ~0.28s -> ~0.17s == ~3.36x -> ~5.59x.
-#     Note: profile() runs before time_generation, so the (one-time) compilation
-#     + autotuning is paid during profiling and time_generation runs warm. (The
-#     huge "Self CPU time total: 40s" in the profile table is that compile cost,
-#     not the runtime -- the real number is the 0.17s time_generation line.)
 #
 # Final: ~5.59x on H100 (KV cache + sync-once + bf16 + torch.compile).
 #
@@ -160,6 +152,5 @@ if __name__ == "__main__":
 #   total work from O(n^2) to O(n) (~0.95s -> ~0.28s). That fix also CHANGED the
 #   bottleneck: with the GPU math now tiny, the loop became CPU-dispatch-bound,
 #   which is exactly why torch.compile's op-fusion then mattered as the second
-#   win (~0.28s -> ~0.17s) -- and why bf16/sync-removal, which only touch GPU
-#   compute, contributed almost nothing on their own. The recurring lesson:
+#   win (~0.28s -> ~0.17s). The recurring lesson:
 #   each fix only pays for the bottleneck that is currently dominating.
