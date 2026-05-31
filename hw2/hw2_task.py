@@ -14,7 +14,6 @@ from torch.profiler import ProfilerActivity, record_function
 def optimized_loop(model, input_ids, n_steps):
     # TODO: fix the performance issues you found — changes may include
     # both `optimized_loop` and `generate_optimized`
-    generated_ids = input_ids.clone()
     generated_tokens = []
     
     # ── prefill: process the full prompt ONCE, build the cache
@@ -29,7 +28,6 @@ def optimized_loop(model, input_ids, n_steps):
         past = outputs.past_key_values
         next_token_id = torch.argmax(outputs.logits[:, -1, :], dim=-1)
         generated_tokens.append(next_token_id)
-        generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(0)], dim=1)
     return torch.cat(generated_tokens).tolist()
 
 
