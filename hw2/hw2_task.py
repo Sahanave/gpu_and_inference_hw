@@ -8,7 +8,7 @@ from utils import (
     PROFILE_STEPS,
     RESULTS_DIR,
 )
-
+from torch.profiler import profile, ProfilerActivity, record_function
 
 def optimized_loop(model, input_ids, n_steps):
     # TODO: fix the performance issues you found — changes may include
@@ -27,7 +27,13 @@ def optimized_loop(model, input_ids, n_steps):
 def profile(loop_fn, model, input_ids, trace_name: str):
     # TODO: wrap loop_fn(model, input_ids, PROFILE_STEPS) with torch.profiler,
     # print the summary table, and export a Chrome trace to RESULTS_DIR / trace_name
-    pass
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+        trace = trace_name.split('.')[0]
+        with record_function(trace):
+            loop_fn(model,input_ids )
+    
+    prof.export_chrome_trace(RESULTS_DIR / f"{trace_name}")
+
 
 
 def generate_optimized(optimized_trace_name: str) -> float:
