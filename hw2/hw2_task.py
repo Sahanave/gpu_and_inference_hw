@@ -125,7 +125,7 @@ if __name__ == "__main__":
 # (3) bf16 weights (build_model(torch.bfloat16)).
 #     Confirmed active in the trace (nvjet tensor-core GEMMs + flash attention vs
 #     fp32 xmma/cutlass in V0). Speedup contributed on H100: ~0 (276ms -> 280ms).
-#     Reason as : after the KV cache the loop is CPU-dispatch-bound
+#     Reason: after the KV cache the loop is CPU-dispatch-bound
 #     (Self CUDA ~4.7ms vs Self CPU ~164ms over the profile), so halving the
 #     already-tiny GPU compute does nothing to wall-clock.
 #
