@@ -16,8 +16,17 @@ def optimized_loop(model, input_ids, n_steps):
     # both `optimized_loop` and `generate_optimized`
     generated_ids = input_ids.clone()
     generated_tokens = []
-    for _ in range(n_steps):
-        outputs = model(input_ids=generated_ids)
+    
+    # ── prefill: process the full prompt ONCE, build the cache
+      outputs = model(input_ids=input_ids, use_cache=True)
+      past = outputs.past_key_values
+      next_token_id = torch.argmax(outputs.logits[:, -1, :], dim=-1)   # (1,)
+      generated_tokens.append(next_token_id)
+
+    for _ in range(n_steps - 1):
+        cur = next_token_id.unsqueeze(0)                              # (1,1)
+        outputs = model(input_ids=cur, past_key_values=past, use_cache=True)
+        past = outputs.past_key_values
         next_token_id = torch.argmax(outputs.logits[:, -1, :], dim=-1)
         generated_tokens.append(next_token_id)
         generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(0)], dim=1)
