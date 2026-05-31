@@ -95,8 +95,58 @@ if __name__ == "__main__":
 # Writeup
 # ============================================================================
 #
+# Numbers below were measured on an H100 (development GPU). The graded run is on
+# an L40S; ratios are expected to be at least as high there (see note at the end).
+#
 # Changes made and speedup per fix:
-#1. First thing that caught my eyt was theat ehere are lot of gpu idle time before 19/20 ms between kernel lauches.  Maybe we should complile so that we do less of the kernel lancues? or have multipel streams to unblock independent kernels.?
+#
+# (0) Baseline V0: slow_loop, fp32, no KV cache. ~0.95s for 128 tokens.
+#
+# (1) Sync once, not per step.
+#     The baseline calls next_token_id.item() every step. In the trace that
+#     shows up as aten::item -> aten::_local_scalar_dense -> cudaStreamSynchronize:
+#     the CPU blocks until the GPU drains all queued work, copies back one token,
+#     and only then launches the next step. That serializes CPU and GPU.
+#     Fix: keep token ids on the GPU, collect them, and do ONE
+#     torch.cat(tokens).tolist() after the loop.
+#     Speedup contributed: ~7 ms only. Small, because while there's no KV cache
+#     the per-step GPU forward is huge and is the real bottleneck -- the sync was
+#     hiding behind GPU compute. (Amdahl: a fix only pays for the bottleneck it
+#     removes. This fix's real value is unlocked after the KV cache, when the loop
+#     becomes launch-bound.)
+#
+# (2) KV cache (the big one).
+#     The baseline re-runs the full forward over the whole growing sequence every
+#     step -- record_shapes shows the matmul/attention input seq dim growing
+#     1024 -> 1035 -> ..., i.e. O(n^2) work, recomputing past tokens' K/V that
+#     never change. Fix: prefill the prompt once with use_cache=True, then feed
+#     only the 1 new token each step carrying past_key_values; the growing
+#     torch.cat on the sequence is removed entirely.
+#     Speedup contributed: ~0.95s -> ~0.28s == ~3.4x. This is essentially the
+#     whole speedup.
+#
+# (3) bf16 weights (build_model(torch.bfloat16)).
+#     Confirmed active in the trace (nvjet tensor-core GEMMs + flash attention vs
+#     fp32 xmma/cutlass in V0). Speedup contributed on H100: ~0 (276ms -> 280ms).
+#     Same Amdahl reason as (1): after the KV cache the loop is CPU-dispatch-bound
+#     (Self CUDA ~4.7ms vs Self CPU ~164ms over the profile), so halving the
+#     already-tiny GPU compute does nothing to wall-clock. Kept because it's free
+#     and should help more on the bandwidth-poor L40S (the prefill is GPU-bound).
+#
+# (4) torch.compile -- TRIED, did NOT help, not used.
+#     Plain torch.compile reduces fusion overhead, but the bottleneck here is
+#     kernel-launch/dispatch overhead (aten::mm: ~70ms CPU dispatch vs ~1.8ms
+#     CUDA). The trace was unchanged (no Torch-Compiled/triton regions), partly
+#     because the growing DynamicCache + eager forward cause graph breaks. To
+#     actually cut dispatch you'd need mode="reduce-overhead" (CUDA graphs) + a
+#     StaticCache (fixed-size, manual cache_position) -- left out as out of scope.
+#
+# Final: ~3.36x on H100 (KV cache + sync-once + bf16).
 #
 # Biggest impact and why:
-#
+#   The KV cache, by far. It turns each decode step from a full O(seq) forward
+#   over the entire growing sequence (recomputing all past tokens' K/V) into an
+#   O(1) single-token forward that reuses cached K/V -- collapsing the loop's
+#   total work from O(n^2) to O(n). Everything else (sync removal, bf16) is a
+#   constant-factor tweak whose value only became visible -- or didn't -- once
+#   the cache had removed the dominant cost.
