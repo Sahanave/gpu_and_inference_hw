@@ -4,3 +4,4 @@ __pycache__/
 hw1/results/
 hw2/results/
 .claude/
+.connecting_to_vm.md
