@@ -48,8 +48,7 @@ def generate_optimized(optimized_trace_name: str) -> float:
     # TODO: load the model (consider dtype and other loading options),
     # then call profile() and time_generation() on optimized_loop.
     # Return the elapsed time from time_generation so main() can print a speedup.
-    model = build_model(torch.bfloat16)          # ← the dtype win
-    compliled_model = torch.compile(model, dynamic=True)
+    model = torch.complile(build_model(torch.bfloat16),dynamic=True)          # ← the dtype win (bf16 instead of fp32)
     input_ids = get_input_ids()
     profile(optimized_loop, model, input_ids, optimized_trace_name)
     elapsed = time_generation(optimized_loop, model, input_ids, "Optimized")
