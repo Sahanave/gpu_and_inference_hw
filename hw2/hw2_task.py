@@ -48,9 +48,11 @@ def generate_optimized(optimized_trace_name: str) -> float:
     # TODO: load the model (consider dtype and other loading options),
     # then call profile() and time_generation() on optimized_loop.
     # Return the elapsed time from time_generation so main() can print a speedup.
-    model = torch.compile(build_model(torch.bfloat16),dynamic=True)          # ← the dtype win (bf16 instead of fp32)
+    model = torch.compile(build_model(torch.bfloat16), dynamic=True)
     input_ids = get_input_ids()
-    profile(optimized_loop, model, input_ids, optimized_trace_name)
+    optimized_loop(model, input_ids, PROFILE_STEPS)   # warmup: compile BEFORE profiling
+    torch.cuda.synchronize()
+    profile(optimized_loop, model, input_ids, optimized_trace_name)   # now a clean trace
     elapsed = time_generation(optimized_loop, model, input_ids, "Optimized")
     del model
     torch.cuda.empty_cache()
@@ -133,20 +135,31 @@ if __name__ == "__main__":
 #     already-tiny GPU compute does nothing to wall-clock. Kept because it's free
 #     and should help more on the bandwidth-poor L40S (the prefill is GPU-bound).
 #
-# (4) torch.compile -- TRIED, did NOT help, not used.
-#     Plain torch.compile reduces fusion overhead, but the bottleneck here is
-#     kernel-launch/dispatch overhead (aten::mm: ~70ms CPU dispatch vs ~1.8ms
-#     CUDA). The trace was unchanged (no Torch-Compiled/triton regions), partly
-#     because the growing DynamicCache + eager forward cause graph breaks. To
-#     actually cut dispatch you'd need mode="reduce-overhead" (CUDA graphs) + a
-#     StaticCache (fixed-size, manual cache_position) -- left out as out of scope.
+# (4) torch.compile(model, dynamic=True) -- the strong second win.
+#     After the KV cache the loop is CPU-dispatch-bound (Self CUDA ~4.7ms vs Self
+#     CPU ~164ms): the cost is launching ~hundreds of tiny ops per step, not the
+#     GPU math. torch.compile (Inductor) FUSES many ops into single Triton kernels
+#     -- the trace shows kernels like triton_poi_fused__to_copy__unsafe_view_add_
+#     bmm_cat_... and Torch-Compiled Region / CompiledFunction entries. Fewer
+#     kernels => fewer launches => the dispatch bottleneck shrinks. dynamic=True
+#     is essential: the KV cache length changes every step, so without it compile
+#     would re-specialize (recompile) on every new length; dynamic=True compiles
+#     one shape-generic graph instead.
+#     Speedup contributed: ~0.28s -> ~0.17s == ~3.36x -> ~5.59x.
+#     Note: profile() runs before time_generation, so the (one-time) compilation
+#     + autotuning is paid during profiling and time_generation runs warm. (The
+#     huge "Self CPU time total: 40s" in the profile table is that compile cost,
+#     not the runtime -- the real number is the 0.17s time_generation line.)
 #
-# Final: ~3.36x on H100 (KV cache + sync-once + bf16).
+# Final: ~5.59x on H100 (KV cache + sync-once + bf16 + torch.compile).
 #
 # Biggest impact and why:
 #   The KV cache, by far. It turns each decode step from a full O(seq) forward
 #   over the entire growing sequence (recomputing all past tokens' K/V) into an
 #   O(1) single-token forward that reuses cached K/V -- collapsing the loop's
-#   total work from O(n^2) to O(n). Everything else (sync removal, bf16) is a
-#   constant-factor tweak whose value only became visible -- or didn't -- once
-#   the cache had removed the dominant cost.
+#   total work from O(n^2) to O(n) (~0.95s -> ~0.28s). That fix also CHANGED the
+#   bottleneck: with the GPU math now tiny, the loop became CPU-dispatch-bound,
+#   which is exactly why torch.compile's op-fusion then mattered as the second
+#   win (~0.28s -> ~0.17s) -- and why bf16/sync-removal, which only touch GPU
+#   compute, contributed almost nothing on their own. The recurring lesson:
+#   each fix only pays for the bottleneck that is currently dominating.
