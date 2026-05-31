@@ -19,10 +19,9 @@ def optimized_loop(model, input_ids, n_steps):
     for _ in range(n_steps):
         outputs = model(input_ids=generated_ids)
         next_token_id = torch.argmax(outputs.logits[:, -1, :], dim=-1)
-        token_value = next_token_id.item()
-        generated_tokens.append(token_value)
+        generated_tokens.append(next_token_id)
         generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(0)], dim=1)
-    return generated_tokens
+    return torch.cat(generated_tokens).tolist()
 
 
 def profile(loop_fn, model, input_ids, trace_name: str):
@@ -84,7 +83,7 @@ if __name__ == "__main__":
 # ============================================================================
 #
 # Changes made and speedup per fix:
-#
+#1. First thing that caught my eyt was theat ehere are lot of gpu idle time before 19/20 ms between kernel lauches.  Maybe we should complile so that we do less of the kernel lancues? or have multipel streams to unblock independent kernels.?
 #
 # Biggest impact and why:
 #
